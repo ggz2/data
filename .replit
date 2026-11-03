@@ -21,13 +21,40 @@ args = "Start application"
 name = "Start application"
 author = "agent"
 
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "python3 -m http.server 5000 --bind 0.0.0.0"
-waitForPort = 5000
-
 [workflows.workflow.metadata]
 outputType = "webview"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = """
+python3 -c 'import http.server, json, os
+from pathlib import Path
+
+ROOT = Path.cwd()
+IMAGE_EXTS = {\".apng\", \".avif\", \".bmp\", \".gif\", \".ico\", \".jpeg\", \".jpg\", \".png\", \".svg\", \".tif\", \".tiff\", \".webp\"}
+SKIP_DIRS = {\"node_modules\", \"vendor\", \"dist\", \"build\", \"__pycache__\", \".venv\"}
+
+class Handler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        if self.path.split(\"?\", 1)[0] == \"/__gallery/files\":
+            images = []
+            for current, dirs, files in os.walk(ROOT, followlinks=False):
+                dirs[:] = [name for name in dirs if not name.startswith(\".\") and name not in SKIP_DIRS]
+                for name in files:
+                    if Path(name).suffix.lower() in IMAGE_EXTS:
+                        images.append((Path(current) / name).relative_to(ROOT).as_posix())
+            payload = json.dumps({\"files\": sorted(images)}).encode(\"utf-8\")
+            self.send_response(200)
+            self.send_header(\"Content-Type\", \"application/json; charset=utf-8\")
+            self.send_header(\"Cache-Control\", \"no-store\")
+            self.send_header(\"Content-Length\", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+        super().do_GET()
+
+http.server.ThreadingHTTPServer((\"0.0.0.0\", 5000), Handler).serve_forever()'"""
+waitForPort = 5000
 
 [[ports]]
 localPort = 5000
