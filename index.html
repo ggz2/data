@@ -325,6 +325,10 @@
 
   let currentImages = [];
   let activeFolder = "all";
+  let activeRequest = null;
+
+  const OWNER = "ggz2";
+  const REPO = "data-server";
 
   const imageExtensions = new Set([
     "apng", "avif", "bmp", "gif", "ico",
@@ -332,63 +336,25 @@
     "tiff", "webp"
   ]);
 
-  // Directories to search, relative to the website root.
-  const searchDirectories = [
-    "assets/",
-    "folda1/"
-  ];
-
-  function isImage(path) {
-    return imageExtensions.has(
-      path.split("?")[0].split(".").pop().toLowerCase()
-    );
-  }
-
-  async function scanDirectory(directory, visited = new Set()) {
-    const url = new URL(directory, window.location.origin);
-
-    if (visited.has(url.href)) return [];
-    visited.add(url.href);
-
-    try {
-      const response = await fetch(url.href);
-
-      if (!response.ok) return [];
-
-      const html = await response.text();
-      const doc = new DOMParser().parseFromString(html, "text/html");
-
-      const images = [];
-
-      // Find image links.
-      for (const link of doc.querySelectorAll("a[href]")) {
-        const href = link.getAttribute("href");
-        if (!href || href.startsWith("?") || href.startsWith("#")) continue;
-
-        const fileUrl = new URL(href, url);
-
-        if (fileUrl.origin !== location.origin) continue;
-
-        if (isImage(fileUrl.pathname)) {
-          images.push(fileUrl.pathname);
-        } else if (
-          href.endsWith("/") &&
-          fileUrl.pathname !== url.pathname
-        ) {
-          images.push(...await scanDirectory(fileUrl.pathname, visited));
-        }
-      }
-
-      return images;
-    } catch {
-      return [];
-    }
+  function encodePath(path) {
+    return path.split("/").map(encodeURIComponent).join("/");
   }
 
   function folderFor(path) {
-    const parts = path.split("/");
-    parts.pop();
-    return parts.join("/") || "Project root";
+    const separator = path.lastIndexOf("/");
+    return separator === -1 ? "Project root" : path.slice(0, separator);
+  }
+
+  function foldersFor(path) {
+    const folder = folderFor(path);
+
+    if (folder === "Project root") return [folder];
+
+    const parts = folder.split("/");
+
+    return parts.map((_, index) =>
+      parts.slice(0, index + 1).join("/")
+    );
   }
 
   function makeCard(path) {
@@ -399,22 +365,25 @@
     preview.className = "preview";
 
     const img = document.createElement("img");
+
+    // Resolve images relative to the website location.
     img.src = new URL(
-      path.split("/").map(encodeURIComponent).join("/"),
+      encodePath(path),
       new URL(".", window.location.href)
     ).href;
-    img.src = path;
+
     img.alt = `Image in ${folderFor(path)}`;
     img.loading = "lazy";
+    img.decoding = "async";
 
     const fallback = document.createElement("span");
     fallback.className = "image-fallback";
     fallback.textContent = "This image could not be previewed.";
 
-    img.onerror = () => {
+    img.addEventListener("error", () => {
       img.style.display = "none";
       fallback.style.display = "block";
-    };
+    }, { once: true });
 
     preview.append(img, fallback);
 
@@ -424,6 +393,7 @@
     const directory = document.createElement("p");
     directory.className = "file-path";
     directory.textContent = folderFor(path);
+    directory.title = folderFor(path);
 
     info.append(directory);
     card.append(preview, info);
@@ -431,92 +401,166 @@
     return card;
   }
 
+  function renderTabs() {
+    const folders = [
+      ...new Set(currentImages.flatMap(foldersFor))
+    ].sort((a, b) => a.localeCompare(b));
+
+    const options = [
+      ["all", "All images"],
+      ...folders.map(folder => [folder, folder])
+    ];
+
+    folderTabs.replaceChildren();
+
+    for (const [value, label] of options) {
+      const tab = document.createElement("button");
+
+      tab.type = "button";
+      tab.textContent = label;
+
+      tab.setAttribute(
+        "aria-selected",
+        String(activeFolder === value)
+      );
+
+      tab.addEventListener("click", () => {
+        activeFolder = value;
+        renderTabs();
+        renderImages();
+      });
+
+      folderTabs.append(tab);
+    }
+  }
+
   function renderImages() {
     const images = activeFolder === "all"
       ? currentImages
-      : currentImages.filter(path =>
-          activeFolder === "Project root"
-            ? !path.substring(1).includes("/")
-            : folderFor(path) === activeFolder
-        );
+      : activeFolder === "Project root"
+        ? currentImages.filter(path => !path.includes("/"))
+        : currentImages.filter(path =>
+            path.startsWith(`${activeFolder}/`)
+          );
 
     gallery.replaceChildren(...images.map(makeCard));
 
     resultCount.textContent =
       `${images.length} ${images.length === 1 ? "image" : "images"}`;
 
-    empty.classList.toggle("visible", images.length === 0);
     empty.textContent = currentImages.length
       ? "There are no images in this folder."
-      : "No images were found.";
+      : "No images were found in the project folders.";
+
+    empty.classList.toggle("visible", images.length === 0);
   }
 
-  function renderTabs() {
-    folderTabs.replaceChildren();
-
-    const folders = [
-      ...new Set(currentImages.map(folderFor))
-    ].sort();
-
-    const options = ["all", ...folders];
-
-    for (const folder of options) {
-      const button = document.createElement("button");
-      button.textContent = folder === "all" ? "All images" : folder;
-
-      button.setAttribute(
-        "aria-selected",
-        String(activeFolder === folder)
-      );
-
-      button.onclick = () => {
-        activeFolder = folder;
-        renderTabs();
-        renderImages();
-      };
-
-      folderTabs.append(button);
-    }
+  function showNotice(message, type = "info") {
+    notice.textContent = message;
+    notice.classList.toggle("visible", Boolean(message));
+    notice.classList.toggle("error", type === "error");
   }
 
   async function scanProject() {
+    if (activeRequest) activeRequest.abort();
+
+    activeRequest = new AbortController();
+    const { signal } = activeRequest;
+
     refreshButton.disabled = true;
     refreshButton.textContent = "Scanning…";
 
-    resultCount.textContent = "Searching folders…";
-    gallery.replaceChildren();
+    resultCount.textContent = "Scanning project folders…";
     empty.classList.add("visible");
-    empty.textContent = "Searching project folders…";
+    empty.textContent = "Searching GitHub repository…";
+
+    gallery.replaceChildren();
+    folderTabs.replaceChildren();
+    showNotice("");
 
     try {
-      const visited = new Set();
-
-      const results = await Promise.all(
-        searchDirectories.map(directory =>
-          scanDirectory(directory, visited)
-        )
+      // Get repository information and default branch.
+      const repoResponse = await fetch(
+        `https://api.github.com/repos/${OWNER}/${REPO}`,
+        { signal }
       );
 
-      currentImages = [
-        ...new Set(results.flat())
-      ].sort();
+      if (!repoResponse.ok) {
+        throw new Error(
+          "Could not access the GitHub repository. Make sure it is public."
+        );
+      }
+
+      const repoData = await repoResponse.json();
+      const branch = repoData.default_branch;
+
+      // Retrieve the complete repository file tree.
+      const treeResponse = await fetch(
+        `https://api.github.com/repos/${OWNER}/${REPO}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
+        { signal }
+      );
+
+      if (!treeResponse.ok) {
+        throw new Error("Could not retrieve the repository file tree.");
+      }
+
+      const treeData = await treeResponse.json();
+
+      if (treeData.truncated) {
+        throw new Error(
+          "The repository is too large for a complete recursive scan."
+        );
+      }
+
+      if (signal.aborted) return;
+
+      // Only search these two folders.
+      currentImages = treeData.tree
+        .filter(file => {
+          if (file.type !== "blob") return false;
+
+          const path = file.path;
+
+          const correctFolder =
+            path.startsWith("assets/") ||
+            path.startsWith("folda1/");
+
+          const extension = path.split(".").pop().toLowerCase();
+
+          return correctFolder && imageExtensions.has(extension);
+        })
+        .map(file => file.path)
+        .sort((a, b) => a.localeCompare(b));
 
       activeFolder = "all";
 
       renderTabs();
       renderImages();
 
-      notice.classList.remove("visible");
+      if (currentImages.length === 0) {
+        showNotice(
+          "No supported images were found inside assets/ or folda1/."
+        );
+      }
+
     } catch (error) {
-      notice.textContent = "Could not scan the project.";
-      notice.classList.add("visible", "error");
+      if (error.name !== "AbortError") {
+        showNotice(error.message, "error");
+        resultCount.textContent = "Could not scan project folders";
+        empty.textContent = "The gallery could not retrieve the images.";
+      }
+
     } finally {
-      refreshButton.disabled = false;
-      refreshButton.textContent = "Refresh";
+      if (!signal.aborted) {
+        activeRequest = null;
+        refreshButton.disabled = false;
+        refreshButton.textContent = "Refresh";
+      }
     }
   }
 
   refreshButton.addEventListener("click", scanProject);
+
   scanProject();
   </script>
 </body>
