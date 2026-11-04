@@ -399,6 +399,10 @@
     preview.className = "preview";
 
     const img = document.createElement("img");
+    img.src = new URL(
+      path.split("/").map(encodeURIComponent).join("/"),
+      new URL(".", window.location.href)
+    ).href;
     img.src = path;
     img.alt = `Image in ${folderFor(path)}`;
     img.loading = "lazy";
